@@ -69,6 +69,35 @@ TORCHREC_TYPES: Set[Type[Union[EmbeddingBagCollection, EmbeddingCollection]]] = 
 }
 
 
+class _OptimizerWithRecStoreSparse:
+    def __init__(self, dense_optimizer: Any, sparse_optimizer: Any) -> None:
+        self._dense_optimizer = dense_optimizer
+        self._sparse_optimizer = sparse_optimizer
+
+    def zero_grad(self) -> None:
+        self._dense_optimizer.zero_grad()
+        self._sparse_optimizer.zero_grad()
+
+    def step(self) -> None:
+        self._dense_optimizer.step()
+        self._sparse_optimizer.step()
+        self._sparse_optimizer.flush()
+
+    def state_dict(self) -> Dict[str, Any]:
+        state_dict: Dict[str, Any] = {"dense": self._dense_optimizer.state_dict()}
+        sparse_state_dict = getattr(self._sparse_optimizer, "state_dict", None)
+        if callable(sparse_state_dict):
+            state_dict["sparse"] = sparse_state_dict()
+        return state_dict
+
+    def load_state_dict(self, state_dict: Dict[str, Any]) -> None:
+        self._dense_optimizer.load_state_dict(state_dict.get("dense", state_dict))
+
+
+def _is_recstore_sparse_module(module: torch.nn.Module) -> bool:
+    return bool(getattr(module, "is_recstore_sparse_module", False))
+
+
 def setup(
     rank: int, world_size: int, master_port: int, device: torch.device
 ) -> dist.ProcessGroup:
@@ -168,6 +197,8 @@ class ChunkDistributedSampler(DistributedSampler[_T_co]):
 @gin.configurable
 def make_model(
     dataset: str,
+    embedding_collection_backend: str = "torchrec",
+    recstore_initialize_values: bool = False,
 ) -> Tuple[torch.nn.Module, DlrmHSTUConfig, Dict[str, EmbeddingConfig]]:
     hstu_config = get_hstu_configs(dataset)
     table_config = get_embedding_table_config(dataset)
@@ -176,6 +207,8 @@ def make_model(
         hstu_configs=hstu_config,
         embedding_tables=table_config,
         is_inference=False,
+        embedding_collection_backend=embedding_collection_backend,
+        recstore_initialize_values=recstore_initialize_values,
     )
 
     return (
@@ -258,7 +291,7 @@ def make_optimizer_and_shard(
     model: torch.nn.Module,
     device: torch.device,
     world_size: int,
-) -> Tuple[DistributedModelParallel, torch.optim.Optimizer]:
+) -> Tuple[DistributedModelParallel, Any]:
     dense_opt_cls, dense_opt_args, dense_opt_factory = (
         dense_optimizer_factory_and_class()
     )
@@ -331,6 +364,19 @@ def make_optimizer_and_shard(
     # pyrefly: ignore [bad-argument-type]
     output_optimizer = CombinedOptimizer(all_optimizers)
     output_optimizer.init_state(set(model.sparse_grad_parameter_names()))
+    recstore_sparse_modules = [
+        module for module in model.modules() if _is_recstore_sparse_module(module)
+    ]
+    if recstore_sparse_modules:
+        from recstore.optimizer import SparseSGD
+
+        output_optimizer = _OptimizerWithRecStoreSparse(
+            dense_optimizer=output_optimizer,
+            sparse_optimizer=SparseSGD(
+                recstore_sparse_modules,
+                lr=float(sparse_opt_args["lr"]),
+            ),
+        )
     return model, output_optimizer
 
 

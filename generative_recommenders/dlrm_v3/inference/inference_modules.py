@@ -98,6 +98,8 @@ def get_hstu_model(
     table_device: str = "meta",
     max_hash_size: Optional[int] = None,
     is_dense: bool = False,
+    embedding_collection_backend: str = "torchrec",
+    recstore_initialize_values: bool = False,
 ) -> DlrmHSTU:
     """
     Create and initialize an HSTU model for inference.
@@ -122,6 +124,8 @@ def get_hstu_model(
         embedding_tables=table_config,
         is_inference=IS_INFERENCE,
         is_dense=is_dense,
+        embedding_collection_backend=embedding_collection_backend,
+        recstore_initialize_values=recstore_initialize_values,
     )
     model.eval()
     model.recursive_setattr("_use_triton_cc", False)
@@ -155,12 +159,16 @@ class HSTUSparseInferenceModule(torch.nn.Module):
         self,
         table_config,
         hstu_config: DlrmHSTUConfig,
+        embedding_collection_backend: str = "torchrec",
+        recstore_initialize_values: bool = False,
     ) -> None:
         super().__init__()
         self._hstu_model: DlrmHSTU = get_hstu_model(
             table_config,
             hstu_config,
             table_device="cpu",
+            embedding_collection_backend=embedding_collection_backend,
+            recstore_initialize_values=recstore_initialize_values,
         )
 
     def forward(

@@ -126,6 +126,8 @@ class DlrmHSTU(HammerModule):
         is_inference: bool,
         is_dense: bool = False,
         bf16_training: bool = True,
+        embedding_collection_backend: str = "torchrec",
+        recstore_initialize_values: bool = False,
     ) -> None:
         super().__init__(is_inference=is_inference)
         logger.info(f"Initialize HSTU module with configs {hstu_configs}")
@@ -134,11 +136,31 @@ class DlrmHSTU(HammerModule):
         set_static_max_seq_lens([self._hstu_configs.max_seq_len])
 
         if not is_dense:
-            self._embedding_collection: EmbeddingCollection = EmbeddingCollection(
-                tables=list(embedding_tables.values()),
-                need_indices=False,
-                device=torch.device("meta"),
-            )
+            if embedding_collection_backend == "torchrec":
+                self._embedding_collection: torch.nn.Module = EmbeddingCollection(
+                    tables=list(embedding_tables.values()),
+                    need_indices=False,
+                    device=torch.device("meta"),
+                )
+            elif embedding_collection_backend == "recstore":
+                try:
+                    from torchrec_kv import RecStoreEmbeddingCollection
+                except ModuleNotFoundError as error:
+                    raise RuntimeError(
+                        "RecStore backend requires PYTHONPATH to include "
+                        "RecStore/src/python/pytorch."
+                    ) from error
+
+                self._embedding_collection = RecStoreEmbeddingCollection(
+                    tables=list(embedding_tables.values()),
+                    need_indices=False,
+                    initialize_values=recstore_initialize_values,
+                )
+            else:
+                raise ValueError(
+                    f"Unsupported embedding_collection_backend: "
+                    f"{embedding_collection_backend}"
+                )
 
         # multitask configs must be sorted by task types
         self._multitask_configs: List[TaskConfig] = hstu_configs.multitask_configs

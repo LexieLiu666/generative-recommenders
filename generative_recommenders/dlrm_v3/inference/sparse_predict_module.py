@@ -60,13 +60,20 @@ class HSTUSparseScriptModule(torch.nn.Module):
         table_config: Dict[str, EmbeddingConfig],
         hstu_config: DlrmHSTUConfig,
         use_no_copy_embedding_collection: bool = True,
+        embedding_collection_backend: str = "torchrec",
+        recstore_initialize_values: bool = False,
     ) -> None:
         super().__init__()
         self._sparse: HSTUSparseInferenceModule = HSTUSparseInferenceModule(
             table_config=table_config,
             hstu_config=hstu_config,
+            embedding_collection_backend=embedding_collection_backend,
+            recstore_initialize_values=recstore_initialize_values,
         )
-        if use_no_copy_embedding_collection:
+        if (
+            use_no_copy_embedding_collection
+            and embedding_collection_backend == "torchrec"
+        ):
             # Re-class the existing EmbeddingCollection so TorchScript picks up
             # the no-copy ``forward`` override (matches the eager-only
             # ``ec_patched_forward_wo_embedding_copy`` monkey-patch).
