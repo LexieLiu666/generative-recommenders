@@ -61,6 +61,8 @@ def _main_func(
     master_port: int,
     gin_file: str,
     mode: str,
+    embedding_backend: str,
+    checkpoint_path: str,
 ) -> None:
     device = torch.device(f"cuda:{rank}")
     logger.info(f"rank: {rank}, world_size: {world_size}, device: {device}")
@@ -72,8 +74,12 @@ def _main_func(
     )
     # parse all arguments
     gin.parse_config_file(gin_file)
+    if checkpoint_path:
+        gin.bind_parameter("save_dmp_checkpoint.path", checkpoint_path)
 
-    model, model_configs, embedding_table_configs = make_model()
+    model, model_configs, embedding_table_configs = make_model(
+        embedding_collection_backend=embedding_backend
+    )
     model, optimizer = make_optimizer_and_shard(
         model=model, device=device, world_size=world_size
     )
@@ -157,6 +163,17 @@ def get_args():  # pyre-ignore [3]
         choices=["train", "eval", "train-eval", "streaming-train-eval"],
         help="mode",
     )
+    parser.add_argument(
+        "--embedding-backend",
+        default="torchrec",
+        choices=["torchrec", "recstore"],
+        help="embedding collection backend",
+    )
+    parser.add_argument(
+        "--checkpoint-path",
+        default="",
+        help="directory where training checkpoints are written",
+    )
     args, unknown_args = parser.parse_known_args()
     logger.warning(f"unknown_args: {unknown_args}")
     return args
@@ -178,7 +195,14 @@ def main() -> None:
 
     mp.start_processes(
         _main_func,
-        args=(WORLD_SIZE, MASTER_PORT, gin_path, args.mode),
+        args=(
+            WORLD_SIZE,
+            MASTER_PORT,
+            gin_path,
+            args.mode,
+            args.embedding_backend,
+            args.checkpoint_path,
+        ),
         nprocs=WORLD_SIZE,
         join=True,
         start_method="spawn",

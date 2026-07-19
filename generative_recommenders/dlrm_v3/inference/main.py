@@ -85,6 +85,17 @@ def get_args():  # pyre-ignore [3]
     parser.add_argument(
         "--dataset", default="debug", choices=SUPPORTED_DATASETS, help="dataset"
     )
+    parser.add_argument(
+        "--embedding-backend",
+        default="torchrec",
+        choices=["torchrec", "recstore"],
+        help="embedding collection backend",
+    )
+    parser.add_argument(
+        "--model-path",
+        default="",
+        help="training checkpoint directory to load",
+    )
     args, unknown_args = parser.parse_known_args()
     logger.warning(f"unknown_args: {unknown_args}")
     return args
@@ -583,6 +594,7 @@ def run(
     numpy_rand_seed: int = 123,
     sparse_quant: bool = False,
     dataset_percentage: float = 1.0,
+    embedding_collection_backend: str = "torchrec",
 ) -> None:
     """
     Execute the MLPerf DLRMv3 inference benchmark.
@@ -606,6 +618,7 @@ def run(
         numpy_rand_seed: Random seed for reproducibility.
         sparse_quant: Whether to quantize sparse embeddings.
         dataset_percentage: Fraction of dataset to use.
+        embedding_collection_backend: Sparse embedding implementation to use.
     """
     set_dev_mode(False)
     if scenario_name not in SCENARIO_MAP:
@@ -643,6 +656,7 @@ def run(
         sparse_quant=sparse_quant,
         output_trace=output_trace,
         compute_eval=compute_eval,
+        embedding_collection_backend=embedding_collection_backend,
     )
     is_streaming: bool = "streaming" in dataset
     dataset, kwargs = get_dataset(dataset, dataset_path_prefix)
@@ -804,7 +818,12 @@ def main() -> None:
     logger.info(args)
     gin_path = f"{os.path.dirname(__file__)}/gin/{SUPPORTED_CONFIGS[args.dataset]}"
     gin.parse_config_file(gin_path)
-    run(dataset=args.dataset)
+    if args.model_path:
+        gin.bind_parameter("run.model_path", args.model_path)
+    run(
+        dataset=args.dataset,
+        embedding_collection_backend=args.embedding_backend,
+    )
 
 
 if __name__ == "__main__":

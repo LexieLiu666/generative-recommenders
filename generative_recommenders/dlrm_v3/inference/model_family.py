@@ -76,6 +76,7 @@ class HSTUModelFamily:
         output_trace: bool = False,
         sparse_quant: bool = False,
         compute_eval: bool = False,
+        embedding_collection_backend: str = "torchrec",
     ) -> None:
         self.hstu_config = hstu_config
         self.table_config = table_config
@@ -83,6 +84,7 @@ class HSTUModelFamily:
             hstu_config=hstu_config,
             table_config=table_config,
             quant=sparse_quant,
+            embedding_collection_backend=embedding_collection_backend,
         )
 
         assert torch.cuda.is_available(), "CUDA is required for this benchmark."
@@ -228,12 +230,16 @@ class ModelFamilySparseDist:
         hstu_config: DlrmHSTUConfig,
         table_config: Dict[str, EmbeddingConfig],
         quant: bool = False,
+        embedding_collection_backend: str = "torchrec",
     ) -> None:
         super(ModelFamilySparseDist, self).__init__()
         self.hstu_config = hstu_config
         self.table_config = table_config
         self.module: Optional[torch.nn.Module] = None
         self.quant: bool = quant
+        self.embedding_collection_backend = embedding_collection_backend
+        if self.quant and self.embedding_collection_backend != "torchrec":
+            raise ValueError("Sparse quantization is only supported by TorchRec.")
 
     def load(self, model_path: str) -> None:
         """
@@ -247,8 +253,11 @@ class ModelFamilySparseDist:
         sparse_arch: HSTUSparseInferenceModule = HSTUSparseInferenceModule(
             table_config=self.table_config,
             hstu_config=self.hstu_config,
+            embedding_collection_backend=self.embedding_collection_backend,
+            recstore_initialize_values=False,
         )
-        load_sparse_checkpoint(model=sparse_arch._hstu_model, path=model_path)
+        if self.embedding_collection_backend == "torchrec":
+            load_sparse_checkpoint(model=sparse_arch._hstu_model, path=model_path)
         sparse_arch.eval()
         if self.quant:
             self.module = quant.quantize_dynamic(
@@ -266,13 +275,15 @@ class ModelFamilySparseDist:
                 },
                 inplace=False,
             )
-        else:
+        elif self.embedding_collection_backend == "torchrec":
             sparse_arch._hstu_model._embedding_collection.forward = (  # pyre-ignore[8]
                 functools.partial(
                     ec_patched_forward_wo_embedding_copy,
                     sparse_arch._hstu_model._embedding_collection,
                 )
             )
+            self.module = sparse_arch
+        else:
             self.module = sparse_arch
         logger.warning(f"sparse module is {self.module}")
 

@@ -481,11 +481,13 @@ def train_loop(
 ) -> None:
     model.train()
     batch_idx: int = start_batch_idx
+    saved_after_last_step = False
     profiler = Profiler(rank, active=10) if output_trace else None
 
     for epoch in range(num_epochs):
         dataloader.sampler.set_epoch(epoch)  # pyre-ignore [16]
         for sample in dataloader:
+            saved_after_last_step = False
             optimizer.zero_grad()
             sample.to(device)
             (
@@ -526,6 +528,7 @@ def train_loop(
                     rank=rank,
                     batch_idx=batch_idx,
                 )
+                saved_after_last_step = True
             batch_idx += 1
             if output_trace:
                 assert profiler is not None
@@ -534,6 +537,15 @@ def train_loop(
                 break
         if num_batches is not None and batch_idx >= num_batches:
             break
+
+    if batch_idx > start_batch_idx and not saved_after_last_step:
+        save_dmp_checkpoint(
+            model=model,
+            optimizer=optimizer,
+            metric_logger=metric_logger,
+            rank=rank,
+            batch_idx=batch_idx,
+        )
 
 
 @gin.configurable
