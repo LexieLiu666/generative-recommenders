@@ -340,9 +340,9 @@ class DLRMv3RandomDataset(Dataset):
 
         self.contexual_features = []
         if hstu_config.contextual_feature_to_max_length is not None:
-            self.contexual_features = [
-                p[0] for p in hstu_config.contextual_feature_to_max_length
-            ]
+            self.contexual_features = list(
+                hstu_config.contextual_feature_to_max_length
+            )
 
         self.num_aggregated_samples = num_aggregated_samples
         self.items_in_memory = {}

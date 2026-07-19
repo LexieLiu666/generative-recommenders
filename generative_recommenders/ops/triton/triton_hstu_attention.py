@@ -29,6 +29,8 @@ from generative_recommenders.ops.utils import (
     maybe_register_custom_op,
 )
 
+_make_tensor_descriptor = getattr(tl, "make_tensor_descriptor", None)
+
 try:
     # @manual=//triton:triton
     import triton.language.extra.tlx as tlx  # type: ignore
@@ -66,7 +68,7 @@ except ImportError:
 
 
 def _host_descriptor_pre_hook(nargs):
-    if not tensor_descriptor_tma:
+    if not tensor_descriptor_tma or _make_tensor_descriptor is None:
         return
 
     if not isinstance(nargs["Q"], TensorDescriptor):
@@ -2556,42 +2558,42 @@ def _hstu_attn_bwd(  # noqa C901
     device_desc_dk = None
     device_desc_dv = None
     if ENABLE_TMA:
-        device_desc_q = tl.make_tensor_descriptor(
+        device_desc_q = _make_tensor_descriptor(
             Q,
             shape=[seq_len, H * DimQ],
             # pyrefly: ignore [bad-argument-type]
             strides=[H * DimQ, 1],
             block_shape=[BLOCK_M, BLOCK_D_Q],
         )
-        device_desc_do = tl.make_tensor_descriptor(
+        device_desc_do = _make_tensor_descriptor(
             DOut,
             shape=[seq_len, H * DimV],
             # pyrefly: ignore [bad-argument-type]
             strides=[H * DimV, 1],
             block_shape=[BLOCK_M, BLOCK_D_V],
         )
-        device_desc_k = tl.make_tensor_descriptor(
+        device_desc_k = _make_tensor_descriptor(
             K,
             shape=[seq_len, H * DimQ],
             # pyrefly: ignore [bad-argument-type]
             strides=[H * DimQ, 1],
             block_shape=[BLOCK_N, BLOCK_D_Q],
         )
-        device_desc_dk = tl.make_tensor_descriptor(
+        device_desc_dk = _make_tensor_descriptor(
             DK,
             shape=[seq_len, H * DimQ],
             # pyrefly: ignore [bad-argument-type]
             strides=[H * DimQ, 1],
             block_shape=[BLOCK_N, BLOCK_D_Q],
         )
-        device_desc_v = tl.make_tensor_descriptor(
+        device_desc_v = _make_tensor_descriptor(
             V,
             shape=[seq_len, H * DimV],
             # pyrefly: ignore [bad-argument-type]
             strides=[H * DimV, 1],
             block_shape=[BLOCK_N, BLOCK_D_V],
         )
-        device_desc_dv = tl.make_tensor_descriptor(
+        device_desc_dv = _make_tensor_descriptor(
             DV,
             shape=[seq_len, H * DimV],
             # pyrefly: ignore [bad-argument-type]
