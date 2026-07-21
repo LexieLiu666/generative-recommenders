@@ -368,14 +368,33 @@ def make_optimizer_and_shard(
         module for module in model.modules() if _is_recstore_sparse_module(module)
     ]
     if recstore_sparse_modules:
-        from recstore.optimizer import SparseSGD
+        if float(sparse_opt_args.get("weight_decay", 0.0)) != 0.0:
+            raise ValueError("RecStore sparse optimizers do not support weight_decay")
+        if sparse_opt_cls is torchrec.optim.RowWiseAdagrad:
+            from recstore.optimizer import SparseRowWiseAdagrad
+
+            recstore_sparse_optimizer = SparseRowWiseAdagrad(
+                recstore_sparse_modules,
+                lr=float(sparse_opt_args["lr"]),
+                eps=float(sparse_opt_args["eps"]),
+            )
+        elif sparse_opt_cls is torchrec.optim.SGD:
+            if float(sparse_opt_args.get("momentum", 0.0)) != 0.0:
+                raise ValueError("RecStore SparseSGD does not support momentum")
+            from recstore.optimizer import SparseSGD
+
+            recstore_sparse_optimizer = SparseSGD(
+                recstore_sparse_modules,
+                lr=float(sparse_opt_args["lr"]),
+            )
+        else:
+            raise ValueError(
+                f"RecStore does not support sparse optimizer {sparse_opt_cls.__name__}"
+            )
 
         output_optimizer = _OptimizerWithRecStoreSparse(
             dense_optimizer=output_optimizer,
-            sparse_optimizer=SparseSGD(
-                recstore_sparse_modules,
-                lr=float(sparse_opt_args["lr"]),
-            ),
+            sparse_optimizer=recstore_sparse_optimizer,
         )
     return model, output_optimizer
 
