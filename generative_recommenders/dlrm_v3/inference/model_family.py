@@ -256,8 +256,7 @@ class ModelFamilySparseDist:
             embedding_collection_backend=self.embedding_collection_backend,
             recstore_initialize_values=False,
         )
-        if self.embedding_collection_backend == "torchrec":
-            load_sparse_checkpoint(model=sparse_arch._hstu_model, path=model_path)
+        load_sparse_checkpoint(model=sparse_arch._hstu_model, path=model_path)
         sparse_arch.eval()
         if self.quant:
             self.module = quant.quantize_dynamic(
