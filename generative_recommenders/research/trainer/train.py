@@ -40,6 +40,7 @@ from generative_recommenders.research.modeling.sequential.autoregressive_losses 
 from generative_recommenders.research.modeling.sequential.embedding_modules import (
     EmbeddingModule,
     LocalEmbeddingModule,
+    RecStoreEmbeddingModule,
 )
 from generative_recommenders.research.modeling.sequential.encoder_utils import (
     get_sequential_encoder,
@@ -63,6 +64,41 @@ from generative_recommenders.research.modeling.similarity_utils import (
 from generative_recommenders.research.trainer.data_loader import create_data_loader
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.tensorboard import SummaryWriter
+
+
+class _OptimizerWithSparse:
+    def __init__(self, dense_optimizer: torch.optim.Optimizer, sparse_optimizer: object):
+        self._dense_optimizer = dense_optimizer
+        self._sparse_optimizer = sparse_optimizer
+
+    def zero_grad(self) -> None:
+        self._dense_optimizer.zero_grad()
+        self._sparse_optimizer.zero_grad()
+
+    def step(self) -> None:
+        self._dense_optimizer.step()
+        self._sparse_optimizer.step()
+        flush = getattr(self._sparse_optimizer, "flush", None)
+        if callable(flush):
+            flush()
+
+    @property
+    def param_groups(self):
+        return self._dense_optimizer.param_groups + self._sparse_optimizer.param_groups
+
+    def state_dict(self) -> Dict[str, object]:
+        state = {"dense": self._dense_optimizer.state_dict()}
+        sparse_state_dict = getattr(self._sparse_optimizer, "state_dict", None)
+        if callable(sparse_state_dict):
+            state["sparse"] = sparse_state_dict()
+        return state
+
+    def load_state_dict(self, state_dict: Dict[str, object]) -> None:
+        self._dense_optimizer.load_state_dict(
+            state_dict.get("dense", state_dict)  # type: ignore[arg-type]
+        )
+        if "sparse" in state_dict:
+            self._sparse_optimizer.load_state_dict(state_dict["sparse"])
 
 
 def setup(rank: int, world_size: int, master_port: int) -> None:
@@ -123,6 +159,15 @@ def train_fn(
     partial_eval_num_iters: int = 32,
     embedding_module_type: str = "local",
     item_embedding_dim: int = 240,
+    local_embedding_optimizer: str = "AdamW",
+    local_embedding_optimizer_eps: float = 1e-10,
+    recstore_table_name: str = "hstu_items",
+    recstore_initialize_values: bool = False,
+    recstore_sparse_optimizer: str = "RowWiseAdagrad",
+    recstore_sparse_optimizer_eps: float = 1e-10,
+    recstore_sparse_optimizer_beta1: float = 0.9,
+    recstore_sparse_optimizer_beta2: float = 0.98,
+    recstore_sparse_optimizer_weight_decay: float = 0.0,
     interaction_module_type: str = "",
     gr_output_length: int = 10,
     l2_norm_eps: float = 1e-6,
@@ -131,6 +176,7 @@ def train_fn(
 ) -> None:
     # to enable more deterministic results.
     random.seed(random_seed)
+    torch.manual_seed(random_seed)
     torch.backends.cuda.matmul.allow_tf32 = enable_tf32
     torch.backends.cudnn.allow_tf32 = enable_tf32
     logging.info(f"cuda.matmul.allow_tf32: {enable_tf32}")
@@ -167,6 +213,13 @@ def train_fn(
         embedding_module: EmbeddingModule = LocalEmbeddingModule(
             num_items=dataset.max_item_id,
             item_embedding_dim=item_embedding_dim,
+        )
+    elif embedding_module_type == "recstore":
+        embedding_module = RecStoreEmbeddingModule(
+            num_items=dataset.max_item_id,
+            item_embedding_dim=item_embedding_dim,
+            table_name=recstore_table_name,
+            initialize_values=recstore_initialize_values,
         )
     else:
         raise ValueError(f"Unknown embedding_module_type {embedding_module_type}")
@@ -209,6 +262,10 @@ def train_fn(
         verbose=True,
     )
     model_debug_str = model.debug_str()
+    if embedding_module_type == "recstore":
+        model_debug_str += "-recstore"
+    elif local_embedding_optimizer == "RowWiseAdagrad":
+        model_debug_str += "-local-rowwise"
 
     # loss
     loss_debug_str = loss_module
@@ -243,9 +300,14 @@ def train_fn(
             f"in-batch{f'-l2-eps{l2_norm_eps}' if item_l2_norm else ''}-dedup"
         )
     elif sampling_strategy == "local":
+        item_lookup = (
+            embedding_module
+            if embedding_module_type == "recstore"
+            else embedding_module._item_emb  # type: ignore[attr-defined]
+        )
         negatives_sampler = LocalNegativesSampler(
             num_items=dataset.max_item_id,
-            item_emb=model._embedding_module._item_emb,
+            item_emb=item_lookup,
             all_item_ids=dataset.all_item_ids,
             l2_norm=item_l2_norm,
             l2_norm_eps=l2_norm_eps,
@@ -264,12 +326,72 @@ def train_fn(
     model = DDP(model, device_ids=[rank], broadcast_buffers=False)
 
     # TODO: wrap in create_optimizer.
-    opt = torch.optim.AdamW(
-        model.parameters(),
+    use_local_rowwise = (
+        embedding_module_type == "local"
+        and local_embedding_optimizer == "RowWiseAdagrad"
+    )
+    if embedding_module_type == "local" and local_embedding_optimizer not in (
+        "AdamW",
+        "RowWiseAdagrad",
+    ):
+        raise ValueError(
+            f"Unsupported local embedding optimizer {local_embedding_optimizer}"
+        )
+    embedding_weight = (
+        embedding_module._item_emb.weight  # type: ignore[attr-defined]
+        if use_local_rowwise
+        else None
+    )
+    dense_parameters = (
+        [parameter for parameter in model.parameters() if parameter is not embedding_weight]
+        if use_local_rowwise
+        else model.parameters()
+    )
+    dense_opt = torch.optim.AdamW(
+        dense_parameters,
         lr=learning_rate,
         betas=(0.9, 0.98),
         weight_decay=weight_decay,
     )
+    if use_local_rowwise:
+        from torchrec.optim import RowWiseAdagrad
+
+        sparse_opt = RowWiseAdagrad(
+            [embedding_weight],
+            lr=learning_rate,
+            eps=local_embedding_optimizer_eps,
+        )
+        opt = _OptimizerWithSparse(dense_opt, sparse_opt)
+    elif embedding_module_type == "recstore":
+        from recstore.optimizer import SparseAdamW, SparseRowWiseAdagrad, SparseSGD
+
+        sparse_module = embedding_module.recstore_embedding_collection  # type: ignore[attr-defined]
+        if recstore_sparse_optimizer == "RowWiseAdagrad":
+            sparse_opt = SparseRowWiseAdagrad(
+                [sparse_module],
+                lr=learning_rate,
+                eps=recstore_sparse_optimizer_eps,
+            )
+        elif recstore_sparse_optimizer == "SGD":
+            sparse_opt = SparseSGD([sparse_module], lr=learning_rate)
+        elif recstore_sparse_optimizer == "AdamW":
+            sparse_opt = SparseAdamW(
+                [sparse_module],
+                lr=learning_rate,
+                betas=(
+                    recstore_sparse_optimizer_beta1,
+                    recstore_sparse_optimizer_beta2,
+                ),
+                eps=recstore_sparse_optimizer_eps,
+                weight_decay=recstore_sparse_optimizer_weight_decay,
+            )
+        else:
+            raise ValueError(
+                f"Unsupported RecStore sparse optimizer {recstore_sparse_optimizer}"
+            )
+        opt = _OptimizerWithSparse(dense_opt, sparse_opt)
+    else:
+        opt = dense_opt
 
     date_str = date.today().strftime("%Y-%m-%d")
     model_subfolder = f"{dataset_name}-l{max_sequence_length}"
@@ -280,6 +402,8 @@ def train_fn(
     )
     if full_eval_every_n > 1:
         model_desc += f"-fe{full_eval_every_n}"
+    if embedding_module_type == "recstore":
+        model_desc += f"-{recstore_table_name}"
     if positional_sampling_ratio is not None and positional_sampling_ratio < 1:
         model_desc += f"-d{positional_sampling_ratio}"
     # creates subfolders.
@@ -389,9 +513,10 @@ def train_fn(
                     embeddings=model.module.get_item_embeddings(in_batch_ids),
                 )
             else:
-                # pyre-fixme[16]: `InBatchNegativesSampler` has no attribute
-                #  `_item_emb`.
-                negatives_sampler._item_emb = model.module._embedding_module._item_emb
+                if embedding_module_type == "recstore":
+                    negatives_sampler._item_emb = model.module._embedding_module
+                else:
+                    negatives_sampler._item_emb = model.module._embedding_module._item_emb
 
             ar_mask = supervision_ids[:, 1:] != 0
             loss, aux_losses = ar_loss(
